@@ -1,0 +1,161 @@
+"use client";
+
+import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { auth, db } from "@/lib/firebase";
+import { onAuthStateChanged } from "firebase/auth";
+import { doc, getDoc } from "firebase/firestore";
+
+import Sidebar from "./Sidebar";
+import UserHeader from "./UserHeader"; // Sesuaikan nama import jika nama komponen Header Anda berbeda
+
+interface UserLayoutProps {
+  title: string;
+  description?: string;
+  children: React.ReactNode;
+  userEmail?: string | null;
+  role?: "admin" | "user"; 
+}
+
+export default function UserLayout({ 
+  title, 
+  description, 
+  children,
+  userEmail,
+  role = "user" 
+}: UserLayoutProps) {
+  
+  const router = useRouter();
+
+  // Set selalu false di awal agar hasil render Server dan Client sama persis
+  const [isAuthorized, setIsAuthorized] = useState(false);
+
+  const [isCollapsed, setIsCollapsed] = useState<boolean>(false);
+  const [isMobileOpen, setIsMobileOpen] = useState<boolean>(false);
+  const [mounted, setMounted] = useState<boolean>(false);
+  
+  // Cache data pengguna di sessionStorage untuk mencegah kedipan (flicker) saat pindah halaman
+  const [userName, setUserName] = useState<string | null>(null);
+  const [activeUserEmail, setActiveUserEmail] = useState<string | null>(null);
+
+  // Optimistic Auth Caching & Mencegah Cascading Render
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setMounted(true);
+      
+      const savedSidebar = localStorage.getItem("aetheris_sidebar_collapsed");
+      if (savedSidebar !== null) {
+        setIsCollapsed(JSON.parse(savedSidebar));
+      }
+      
+      const savedName = sessionStorage.getItem("aetheris_user_name");
+      if (savedName) setUserName(savedName);
+      
+      const savedEmail = sessionStorage.getItem("aetheris_user_email");
+      if (savedEmail) setActiveUserEmail(savedEmail);
+
+    }, 0);
+
+    if (sessionStorage.getItem("aetheris_user_auth") === "true") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setIsAuthorized(true);
+    }
+
+    return () => clearTimeout(timer);
+  }, []);
+
+  // FITUR SATPAM (AUTH GUARD) KHUSUS USER
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (!user) {
+        sessionStorage.removeItem("aetheris_user_auth");
+        sessionStorage.removeItem("aetheris_user_name");
+        sessionStorage.removeItem("aetheris_user_email");
+        router.replace("/login");
+      } else {
+        try {
+          setActiveUserEmail(user.email);
+          if (user.email) sessionStorage.setItem("aetheris_user_email", user.email);
+          
+          const userDoc = await getDoc(doc(db, "users", user.uid));
+          
+          if (userDoc.exists() && userDoc.data().role !== "admin") {
+            const rName = userDoc.data().restaurantName || null;
+            setUserName(rName);
+            if (rName) sessionStorage.setItem("aetheris_user_name", rName);
+            
+            sessionStorage.setItem("aetheris_user_auth", "true");
+            setIsAuthorized((prev) => {
+              if (!prev) return true;
+              return prev;
+            });
+          } else if (userDoc.exists() && userDoc.data().role === "admin") {
+            // Jika dia admin tapi mencoba buka halaman user, tendang ke dasbor admin
+            sessionStorage.removeItem("aetheris_user_auth");
+            router.replace("/dashboard/admin"); 
+          } else {
+            sessionStorage.removeItem("aetheris_user_auth");
+            router.replace("/login"); 
+          }
+        } catch (error) {
+          console.error("Gagal memeriksa role:", error);
+          router.replace("/login");
+        }
+      }
+    });
+
+    return () => unsubscribe();
+  }, [router]);
+
+  return (
+    <div className="relative flex min-h-screen text-[var(--foreground)] font-sans antialiased overflow-hidden transition-colors duration-300">
+      
+      {/* MESH GRADIENT BACKGROUND */}
+      <div 
+        className="fixed inset-0 z-[-1] transition-colors duration-500"
+        style={{ background: `linear-gradient(to bottom right, var(--mesh-from), var(--mesh-via), var(--mesh-to))` }}
+      >
+        <div className="absolute top-[-15%] left-[-10%] w-[50vw] h-[50vw] rounded-full blur-[120px] mix-blend-multiply opacity-80 pointer-events-none transition-colors duration-500" style={{ background: `linear-gradient(to bottom right, var(--mesh-blob-1-from), var(--mesh-blob-1-to))` }} />
+        <div className="absolute bottom-[-15%] right-[-5%] w-[60vw] h-[60vw] rounded-full blur-[120px] mix-blend-multiply opacity-80 pointer-events-none transition-colors duration-500" style={{ background: `linear-gradient(to top left, var(--mesh-blob-2-from), var(--mesh-blob-2-to))` }} />
+        <div className="absolute top-[20%] left-[20%] w-[40vw] h-[40vw] rounded-full blur-[100px] pointer-events-none transition-colors duration-500" style={{ backgroundColor: "var(--mesh-blob-3)" }} />
+      </div>
+
+      {/* Sidebar Container */}
+      <div className="z-40 relative shrink-0">
+        <Sidebar 
+          role={role} 
+          userEmail={userEmail}
+          userName={userName}
+          isCollapsed={isCollapsed}
+          setIsCollapsed={setIsCollapsed}
+          isMobileOpen={isMobileOpen}
+          setIsMobileOpen={setIsMobileOpen}
+        />
+      </div>
+
+      {/* Main Content Area */}
+      <div className="flex flex-1 flex-col min-w-0 transition-all duration-300 z-10">
+        <div className="px-4 md:px-6 pt-4 md:pt-6">
+          <div className="w-full">
+            <UserHeader 
+              title={title} 
+              description={description} 
+              onToggleMobileMenu={() => setIsMobileOpen(prev => !prev)}
+            />
+          </div>
+        </div>
+
+        <main className="flex-1 px-4 md:px-6 py-6">
+          <div 
+            className={`w-full transition-opacity duration-500 ease-out ${
+              mounted && isAuthorized ? "opacity-100" : "opacity-0"
+            }`}
+          >
+            {/* Bagian kunci perbaikan Hydration: Tidak ada render children sampai mounted & authorized */}
+            {mounted && isAuthorized ? children : null}
+          </div>
+        </main>
+      </div>
+    </div>
+  );
+}
